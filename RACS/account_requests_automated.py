@@ -1,4 +1,5 @@
 from requests.auth import HTTPBasicAuth
+from requests.auth import HTTPBasicAuth
 import requests
 import subprocess
 import json
@@ -7,6 +8,8 @@ import os
 import pathlib
 
 # Fetch API credentials from environment variables
+# run: export $(grep -v '^#' .env | xargs)
+# first!
 api_token = os.getenv('UPDATE_JIRA_PIRG_API_TOKEN')
 email = os.getenv('UPDATE_JIRA_PIRG_API_EMAIL')
 
@@ -82,6 +85,7 @@ def pull_filtered_tickets():
         fields = issue["fields"]
         summary = fields["summary"]
         status = fields["status"]["name"]
+        name = fields["customfield_10400"]
         pirg = fields["customfield_10401"]
         duckID = fields["customfield_10403"]
         created = fields["created"]
@@ -91,11 +95,13 @@ def pull_filtered_tickets():
         reporter_first = reporter_name[0]
         reporter_last = reporter_name[-1]
 
+        namesplit = (name if reporter else "Empty").split()
+
         pirg_clean = pirg.get("value") if pirg else "None"
     
-        print(f"{key:10} | {status:10} | {reporter_first} | {reporter_last} | {duckID} | {pirg_clean} | {summary} | {created}")
+        print(f"{key:10} | {status:10} | {namesplit[0]} | {namesplit[1]} | {duckID} | {pirg_clean} | {summary} | {created}")
 
-        input_arr.append([reporter_first, reporter_last, pirg_clean, key])
+        input_arr.append([namesplit[0], namesplit[1], pirg_clean, key])
     return input_arr
 
 def change_ticket_status(key):
@@ -170,29 +176,82 @@ def change_ticket_status(key):
     else:
         print(f"[INFO] Ticket {key} assigned to {email}.")
 
-def send_account_requests(extra_var_fileds):
+def send_account_requests(extra_var_fields):
     """
     Automates account request processing by calling an Ansible playbook with issue data.
     After each successful run, updates the corresponding JIRA ticket status and assignment.
 
     Args:
-        extra_var_fileds (list): A list of lists, each containing:
+        extra_var_fields (list): A list of lists, each containing:
                                  [first_name, last_name, pirg, jira_key]
     """
     current_dir = pathlib.Path(__file__).parent.resolve()
-    playbook = current_dir / ".."  # Navigate to parent directory
+    playbook_path = current_dir.parent / "playbooks" / "slurm" / "account_request.yml"
+    print(playbook_path)
 
-    for issue_vars in extra_var_fileds:
+    for issue_vars in extra_var_fields:
         first, last, pirg, key = issue_vars
-        result = subprocess.run(
-            f"cd {playbook}  && ansible-playbook playbooks/slurm/account_request.yml "
-            f"--extra-vars 'first={first} last={last} pirg={pirg} skip_confirmation=true'",
-            shell=True
-        )
+
+        # Clean inputs by explicitly converting to strings and stripping
+        first = str(first).strip()
+        last = str(last).strip()
+        pirg = str(pirg).strip()
+
+        # Construct the command list
+        cmd = [
+            f"cd {str(current_dir.parent)} && ansible-playbook playbooks/slurm/account_request.yml "
+            f"--extra-vars 'first={first} last={last} pirg={pirg} skip_confirmation=false'"
+        ]
+
+        # Run securely without shell=True
+        result = subprocess.run(cmd, capture_output=False, text=True, shell=True)
+
+
+        # Optional: Log stdout/stderr
+        print("Command:", ' '.join(cmd))
+        print("STDOUT:\n", result.stdout)
+        print("STDERR:\n", result.stderr)
+
         if result.returncode == 0:
             change_ticket_status(key)
+        else:
+            print(f"[ERROR] Playbook failed for ticket {key}", file=sys.stderr)
+
     return
 
+def print_usage():
+    print("""
+    Usage: python account_requests_automated.py [option]
+            
+    Send Account Request Emails out to users and update JIRA tickets.
+
+    Options:
+    process        Fetch JIRA tickets, run Ansible playbook, and update ticket status
+    preview        Just fetch and display ticket data without running playbooks
+    fields         List all JIRA fields available (for debugging)
+    auth-test      Test your JIRA authentication credentials
+    help           Show this usage message
+    """)
 if __name__ == "__main__":
-    # Run this script to fetch account requests, process them, and update JIRA
-    send_account_requests(pull_filtered_tickets())
+    if len(sys.argv) < 2:
+        print("[ERROR] No command provided.\n")
+        print_usage()
+        sys.exit(1)
+
+    command = sys.argv[1].lower()
+
+    if command == "process":
+        send_account_requests(pull_filtered_tickets())
+    elif command == "preview":
+        pull_filtered_tickets()
+    elif command == "fields":
+        list_jira_fields()
+    elif command == "auth-test":
+        test_auth()
+    elif command == "help":
+        print_usage()
+    else:
+        print(f"[ERROR] Unknown command: {command}")
+        print_usage()
+        sys.exit(1)
+
